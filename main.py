@@ -1,10 +1,40 @@
-from fastapi import FastAPI,Query
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Query, Depends,HTTPException
+from sqlmodel import Session, SQLModel, create_engine, select, Field
+from sqlalchemy.sql.sqltypes import Text
 from response_models import MacrosResponse
+import pydantic
+import json
 
-from typing import Annotated
+from typing import Annotated,Dict,Any
 from enum import Enum
 from math import ceil
+
+class UserHistory(SQLModel,table=True):
+    id: int = Field(default=None, primary_key=True)
+    user_name: str = Field(index=True)
+    age: int
+    weight: float
+    height: float
+    activity_level:float
+    macros: str  # Store macros as JSON string
+
+sqlite_file_name = "database.db"
+sqlite_url = f"sqlite:///{sqlite_file_name}"
+
+connect_args = {"check_same_thread": False}
+engine = create_engine(sqlite_url, connect_args=connect_args)
+
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+
+SessionDep = Annotated[Session, Depends(get_session)]
 
 class Gender(str,Enum):
     male = 'Male'
@@ -17,18 +47,21 @@ class ActivityLevel(float,Enum):
     very_active = 1.725
     super_active = 1.9
 
-class TdeeCalculator(BaseModel):
+class TdeeCalculator(pydantic.BaseModel):
     gender: Gender
-    age: int = Field(gt=0, examples=[28])
-    weight: float = Field(gt=0, description="value in kg", examples=[86.5])
-    height:float = Field(gt=0, description="value in cm", examples=[169.5])
-    activity_level: ActivityLevel = Field(gt=0, examples=[1.55])
+    age: int = pydantic.Field(gt=0, examples=[28])
+    weight: float = pydantic.Field(gt=0, description="value in kg", examples=[86.5])
+    height:float = pydantic.Field(gt=0, description="value in cm", examples=[169.5])
+    activity_level: ActivityLevel = pydantic.Field(gt=0, examples=[1.55])
 
 
 app = FastAPI()
+@app.on_event("startup")
+def on_startup():
+    create_db_and_tables()
 
 
-@app.post("/tdee/calculate")
+@app.post("/tdee/calculate", tags=['TDEE'])
 def calculate_tdee(item:TdeeCalculator) -> int:
     item_dict = item.model_dump()
     gender = item_dict['gender']
@@ -41,7 +74,7 @@ def calculate_tdee(item:TdeeCalculator) -> int:
 
 
 
-@app.get("/tdee/macros", response_model=MacrosResponse)
+@app.get("/tdee/macros", response_model=MacrosResponse, tags=['TDEE'])
 def macros_reference(
     maintenance_calories: Annotated[int, Query(
         alias= 'maintenance-calories'
@@ -80,3 +113,20 @@ def macros_reference(
 				"carbs": round(carb_grams, 2),
 			}
     return results
+
+
+@app.post('/user/create',tags=['User'])
+def create_user(user: UserHistory, session:SessionDep) -> UserHistory:
+    user.macros = json.dumps(user.macros)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+@app.get("/user/history",tags=['User'])
+def read_hero(user_name: Annotated[str ,Query(alias='username')], session: SessionDep) -> list[UserHistory]:
+    statement = select(UserHistory).where(UserHistory.user_name == user_name)
+    user = session.exec(statement)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
